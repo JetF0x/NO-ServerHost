@@ -215,6 +215,7 @@ namespace JetFoxServer
             NetworkManagerNuclearOption.i.StartHost(hostOptions);
             await Task.Delay(2500);
 
+            //Broke using new method below
             /*SteamLobby steamLobby = SteamLobby.instance;
             if (steamLobby == null)
             {
@@ -227,17 +228,13 @@ namespace JetFoxServer
 
             SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePublic, config.PlayerCount);
 
-
             Logger.LogInfo("Lobby hosted with name: " + config.LobbyName);
             
             await Task.Delay(5000);
 
-            Logger.LogInfo("Server Started - FPS Limiter applied.");
-            // Send Chat Message servers up
             //QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = config.TargetFrameRate;
-
-            //
+            Logger.LogInfo("Server Started - FPS Limiter applied.");
 
             // Disable shadows
             QualitySettings.shadows = ShadowQuality.Disable;
@@ -310,37 +307,32 @@ namespace JetFoxServer
                 Logger.LogInfo("Lobby created successfully with ID: " + lobbyID);
 
                 // Set lobby data
-                // Generate a random string for HostAddress
-                //string randomHostAddress = Guid.NewGuid().ToString();
+                if (_config.UdpSteam == "steam")
+                {
+                    SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", SteamUser.GetSteamID().ToString());
+                    SteamMatchmaking.SetLobbyData(lobbyID, "name", _config.LobbyName);
+                    SteamMatchmaking.SetLobbyData(lobbyID, "version", Application.version);
+                    SteamNetworkPingLocation_t location;
+                    SteamNetworkingUtils.GetLocalPingLocation(out location);
+                    string pingLocationString;
+                    SteamNetworkingUtils.ConvertPingLocationToString(ref location, out pingLocationString, 512);
+                    SteamMatchmaking.SetLobbyData(lobbyID, "HostPing", pingLocationString);
+                }
+                else if (_config.UdpSteam == "udp")
+                {
+                    SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", SteamUser.GetSteamID().ToString());
+                    SteamMatchmaking.SetLobbyData(lobbyID, "name", _config.LobbyName);
+                    SteamMatchmaking.SetLobbyData(lobbyID, "version", Application.version);
+                    SteamMatchmaking.SetLobbyData(lobbyID, "UDP_Address", _config.udpHost);
+                    SteamMatchmaking.SetLobbyData(lobbyID, "UDP_Port", _config.udpPort);
+                    SteamNetworkPingLocation_t location;
+                    SteamNetworkingUtils.GetLocalPingLocation(out location);
+                    string pingLocationString;
+                    SteamNetworkingUtils.ConvertPingLocationToString(ref location, out pingLocationString, 512);
+                    SteamMatchmaking.SetLobbyData(lobbyID, "HostPing", pingLocationString);
+                }
 
-                // Set lobby data
-                //SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", "12345"); if you set this you brick anyone who joins lmao
-                SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", SteamUser.GetSteamID().ToString());
-                //string ipAddress = "45.119.210.199:7777"; // Replace with your server's IP address
-                //SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", $"{ipAddress}");
 
-                SteamMatchmaking.SetLobbyData(lobbyID, "name", _config.LobbyName);
-                SteamMatchmaking.SetLobbyData(lobbyID, "version", Application.version);
-
-                //string udpHost = "45.119.210.199"; // Replace with your actual UDP host IP
-                //int udpPort = 7777; // Replace with your actual UDP port
-
-                //SteamMatchmaking.SetLobbyData(lobbyID, "UdpHost", udpHost);
-                //SteamMatchmaking.SetLobbyData(lobbyID, "UdpPort", udpPort.ToString());
-                //Logger.LogInfo("HostAddress set to: " + randomHostAddress);
-                // Optionally, set UDP-specific data
-                //SteamMatchmaking.SetLobbyData(lobbyID, "UDPPort", "7777"); // Example UDP port
-                // Set the game server information for the lobby
-                //uint gameServerIP = BitConverter.ToUInt32(IPAddress.Parse("158.69.118.213").GetAddressBytes(), 0);
-                //ushort gameServerPort = 7777; // Replace with the actual port of the game server
-                //SteamMatchmaking.SetLobbyGameServer(lobbyID, gameServerIP, gameServerPort, SteamUser.GetSteamID());
-
-
-                SteamNetworkPingLocation_t location;
-                SteamNetworkingUtils.GetLocalPingLocation(out location);
-                string pingLocationString;
-                SteamNetworkingUtils.ConvertPingLocationToString(ref location, out pingLocationString, 512);
-                SteamMatchmaking.SetLobbyData(lobbyID, "HostPing", pingLocationString);
                 //SteamLobby.instance.HostDataLocationLoop().Forget();
             }
             else
@@ -538,6 +530,9 @@ namespace JetFoxServer
             public int RconPort { get; set; }
             public string RconPassword { get; set; }
             public float NetworkTimeoutDuration { get; set; }
+            public string UdpSteam { get; set; }
+            public string udpHost { get; set; }
+            public string udpPort { get; set; }
             //public int ServerPort { get; set; }
         }
     }
