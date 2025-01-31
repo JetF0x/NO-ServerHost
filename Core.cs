@@ -21,7 +21,7 @@ using Microsoft.Extensions.Logging;
 
 namespace JetFoxServer
 {
-    [BepInPlugin("com.jetfox.server", "JetFox Server", "1.2.3")]
+    [BepInPlugin("com.jetfox.server", "JetFox Server", "1.3.5")]
     public class JetFoxServerPlugin : BaseUnityPlugin
     {
         private Harmony _harmony;
@@ -72,7 +72,8 @@ namespace JetFoxServer
                 _rconServer.Start();
                 Logger.LogInfo("Rcon server started on port " + _config.RconPort);
             }
-
+            System.Environment.SetEnvironmentVariable("COMPlus_gcConcurrent", "0");
+            System.Environment.SetEnvironmentVariable("COMPlus_gcServer", "1");
             // Initialize Harmony
             _harmony = new Harmony("com.jetfox.server");
             _harmony.PatchAll();
@@ -207,10 +208,14 @@ namespace JetFoxServer
 
             var hostOptions = new HostOptions
             {
-                SocketType = NuclearOption.Networking.SocketType.Steam,
+                SocketType = config.UdpSteam == "udp" ? NuclearOption.Networking.SocketType.UDP : NuclearOption.Networking.SocketType.Steam,
                 MaxConnections = config.PlayerCount, // Set the maximum number of connections
-                //UdpPort = 7777, // Set the UDP port
             };
+
+            if (config.UdpSteam == "udp")
+            {
+                hostOptions.UdpPort = int.Parse(config.udpPort); // Set the UDP port
+            }
 
             NetworkManagerNuclearOption.i.StartHost(hostOptions);
             await Task.Delay(2500);
@@ -235,6 +240,11 @@ namespace JetFoxServer
             //QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = config.TargetFrameRate;
             Logger.LogInfo("Server Started - FPS Limiter applied.");
+            // Reduce physics updates to 50 per second
+            //Time.fixedDeltaTime = 1.0f / 30.0f; // Default is 0.02 (50 updates per second)
+            //Disable physics auto-simulation
+            Physics.simulationMode = SimulationMode.FixedUpdate; // Static update rate for physics
+            //Physics.simulationMode = SimulationMode.Update; // Dynamic update rate for physics (This mode cuts server FPS in half, but physics are more accurate)
 
             // Disable shadows
             QualitySettings.shadows = ShadowQuality.Disable;
@@ -249,7 +259,8 @@ namespace JetFoxServer
                 QualitySettings.vSyncCount = 0;
                 // Set texture quality to half
                 //QualitySettings.globalTextureMipmapLimit = 3;
-
+                QualitySettings.shadowCascades = 0;
+                QualitySettings.shadowDistance = 0;
                 // Set texture quality to the highest mipmap limit to effectively disable textures
                 QualitySettings.globalTextureMipmapLimit = int.MaxValue;
                 // Disable texture streaming
@@ -270,6 +281,27 @@ namespace JetFoxServer
                 light.enabled = false;
             }
 
+            foreach (var animator in FindObjectsOfType<Animator>())
+            {
+                animator.enabled = false;
+            }
+            // Set particle raycast per frame to 1
+            ParticleSystem[] particleSystems = FindObjectsOfType<ParticleSystem>();
+            foreach (var particleSystem in particleSystems)
+            {
+                var mainModule = particleSystem.main;
+                mainModule.maxParticles = 1;
+            }
+            foreach (var particleSystem in FindObjectsOfType<ParticleSystem>())
+            {
+                particleSystem.Stop();
+            }
+
+            foreach (var camera in Camera.allCameras)
+            {
+                camera.enabled = false;
+            }
+
             // Set the quality level to the lowest
             QualitySettings.SetQualityLevel(0, true);
 
@@ -281,12 +313,14 @@ namespace JetFoxServer
 
             // Disable billboards face camera position
             QualitySettings.billboardsFaceCameraPosition = false;
+            // Set max. pre-rendered frames to 1
+            QualitySettings.maxQueuedFrames = 0;
 
             // Unload unused assets
             Resources.UnloadUnusedAssets();
             // Force garbage collection
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+            //GC.Collect();
+            //GC.WaitForPendingFinalizers();
             // Log the changes
             Logger.LogInfo("Graphics settings have been disabled and textures reduced.");
             // Start sending MOTD messages if not already running
@@ -493,7 +527,6 @@ namespace JetFoxServer
 
         internal static void SendChatMessage(string message)
         {
-            // Assuming there is a ChatManager class with a static method to send chat messages
             ChatManager.SendChatMessage(message, true);
         }
 
@@ -529,7 +562,6 @@ namespace JetFoxServer
             public string[] MOTD { get; set; }
             public int RconPort { get; set; }
             public string RconPassword { get; set; }
-            public float NetworkTimeoutDuration { get; set; }
             public string UdpSteam { get; set; }
             public string udpHost { get; set; }
             public string udpPort { get; set; }
