@@ -17,7 +17,9 @@ using Mirage;
 using Mirage.Authentication;
 using Mirage.SteamworksSocket;
 using Microsoft.Extensions.Logging;
-
+using NuclearOption.SceneLoading;
+using static MapSettingsManager;
+using Cysharp.Threading.Tasks;
 
 namespace JetFoxServer
 {
@@ -39,6 +41,8 @@ namespace JetFoxServer
         private static readonly string BannedPlayersFilePath = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "playerBans.json");
 
         private Callback<LobbyCreated_t> _lobbyCreatedCallback;
+
+        public MapLoader mapLoader;
         public async void Awake()
         {
             _instance = this;
@@ -74,6 +78,8 @@ namespace JetFoxServer
             }
             System.Environment.SetEnvironmentVariable("COMPlus_gcConcurrent", "0");
             System.Environment.SetEnvironmentVariable("COMPlus_gcServer", "1");
+            //System.Environment.SetEnvironmentVariable("COMPlus_GCHeapHardLimit", "2"); // Set the heap hard limit to 2 frames
+
             // Initialize Harmony
             _harmony = new Harmony("com.jetfox.server");
             _harmony.PatchAll();
@@ -185,6 +191,7 @@ namespace JetFoxServer
             Logger.LogInfo("Stopped the game-server.");
             // Delay execution by 5 seconds
             await Task.Delay(5000);
+            //Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = 32;
             Logger.LogInfo("Starting game-server...");
 
             // Get the current mission name
@@ -192,147 +199,121 @@ namespace JetFoxServer
             _currentMissionIndex = (_currentMissionIndex + 1) % config.MissionNames.Length;
 
             // Create a MissionKey for the current mission name in the User group
-            MissionGroup.MissionKey missionKey = new MissionGroup.MissionKey(currentMissionName, MissionGroup.User);
+
+            //MissionGroup.MissionKey missionKey = new MissionGroup.MissionKey(currentMissionName, MissionGroup.BuiltIn);
+            MissionGroup missionGroup;
+            switch (config.MissionGroup.ToLower())
+            {
+                case "builtin":
+                    missionGroup = MissionGroup.BuiltIn;
+                    break;
+                case "user":
+                    missionGroup = MissionGroup.User;
+                    break;
+                case "workshop":
+                    missionGroup = MissionGroup.WorkShop;
+                    break;
+                default:
+                    Logger.LogError("Invalid mission group specified in configuration.");
+                    return;
+            }
+
+            // Create a MissionKey for the current mission name in the specified group
+            MissionKey missionKey = new MissionKey(currentMissionName, currentMissionName, missionGroup);
 
             // Try to load the mission
             if (missionKey.TryLoad(out Mission mission, out string error))
             {
                 Logger.LogInfo("Mission loaded successfully: " + mission.Name);
                 MissionManager.SetMission(mission, true);
+                await Task.Delay(1000);
+                //MissionManager.StartMission();
                 // You can now use the loaded mission
+                var hostOptions = new HostOptions
+                {
+                    SocketType = config.UdpSteam == "udp" ? NuclearOption.Networking.SocketType.UDP : NuclearOption.Networking.SocketType.Steam,
+                    MaxConnections = config.PlayerCount, // Set the maximum number of connections
+                    Map = mission.MapKey
+                };
+
+                if (config.UdpSteam == "udp")
+                {
+                    hostOptions.UdpPort = int.Parse(config.udpPort); // Set the UDP port
+
+                }
+
+
+                NetworkManagerNuclearOption.i.StartHost(hostOptions);
+                await Task.Delay(2500);
+
+                //Broke using new method below
+                /*SteamLobby steamLobby = SteamLobby.instance;
+                if (steamLobby == null)
+                {
+                    Logger.LogError("Failed to get SteamLobby instance.");
+                    return;
+                }
+
+                await steamLobby.HostLobby(config.LobbyName, true, config.PlayerCount);
+                */
+
+                SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePublic, config.PlayerCount);
+
+                Logger.LogInfo("Lobby hosted with name: " + config.LobbyName);
+
+                await Task.Delay(5000);
+
+                OptimizeServerPerformance();
+                // Start sending MOTD messages if not already running
+                if (!_isMOTDTaskRunning)
+                {
+                    _isMOTDTaskRunning = true;
+                    _motdCancellationTokenSource = new CancellationTokenSource();
+                    StartSendingMOTDMessages(config.MOTD, _motdCancellationTokenSource.Token);
+                }
             }
             else
             {
                 Debug.LogError("Failed to load mission: " + error);
             }
 
-            var hostOptions = new HostOptions
-            {
-                SocketType = config.UdpSteam == "udp" ? NuclearOption.Networking.SocketType.UDP : NuclearOption.Networking.SocketType.Steam,
-                MaxConnections = config.PlayerCount, // Set the maximum number of connections
-            };
-
-            if (config.UdpSteam == "udp")
-            {
-                hostOptions.UdpPort = int.Parse(config.udpPort); // Set the UDP port
-            }
-
-            NetworkManagerNuclearOption.i.StartHost(hostOptions);
-            await Task.Delay(2500);
-
-            //Broke using new method below
-            /*SteamLobby steamLobby = SteamLobby.instance;
-            if (steamLobby == null)
-            {
-                Logger.LogError("Failed to get SteamLobby instance.");
-                return;
-            }
             
-            await steamLobby.HostLobby(config.LobbyName, true, config.PlayerCount);
-            */
-
-            SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePublic, config.PlayerCount);
-
-            Logger.LogInfo("Lobby hosted with name: " + config.LobbyName);
-            
-            await Task.Delay(5000);
-
-            //QualitySettings.vSyncCount = 0;
-            Application.targetFrameRate = config.TargetFrameRate;
-            Logger.LogInfo("Server Started - FPS Limiter applied.");
-            // Reduce physics updates to 50 per second
-            //Time.fixedDeltaTime = 1.0f / 30.0f; // Default is 0.02 (50 updates per second)
-            //Disable physics auto-simulation
-            Physics.simulationMode = SimulationMode.FixedUpdate; // Static update rate for physics
-            //Physics.simulationMode = SimulationMode.Update; // Dynamic update rate for physics (This mode cuts server FPS in half, but physics are more accurate)
-
-            // Disable shadows
-            QualitySettings.shadows = ShadowQuality.Disable;
-
-            // Disable anti-aliasing
-            QualitySettings.antiAliasing = 0;
-
-            // Apply graphics settings only once
-            if (!_graphicsSettingsApplied)
-            {
-                // Disable v-sync
-                QualitySettings.vSyncCount = 0;
-                // Set texture quality to half
-                //QualitySettings.globalTextureMipmapLimit = 3;
-                QualitySettings.shadowCascades = 0;
-                QualitySettings.shadowDistance = 0;
-                // Set texture quality to the highest mipmap limit to effectively disable textures
-                QualitySettings.globalTextureMipmapLimit = int.MaxValue;
-                // Disable texture streaming
-                QualitySettings.streamingMipmapsActive = false;
-                // Disable fog
-                RenderSettings.fog = false;
-                _graphicsSettingsApplied = true;
-            }
-
-            // Disable anisotropic filtering
-            QualitySettings.anisotropicFiltering = AnisotropicFiltering.Disable;
-            RenderSettings.reflectionBounces = 0;
-
-            // Disable all lights
-            Light[] lights = FindObjectsOfType<Light>();
-            foreach (Light light in lights)
-            {
-                light.enabled = false;
-            }
-
-            foreach (var animator in FindObjectsOfType<Animator>())
-            {
-                animator.enabled = false;
-            }
-            // Set particle raycast per frame to 1
-            ParticleSystem[] particleSystems = FindObjectsOfType<ParticleSystem>();
-            foreach (var particleSystem in particleSystems)
-            {
-                var mainModule = particleSystem.main;
-                mainModule.maxParticles = 1;
-            }
-            foreach (var particleSystem in FindObjectsOfType<ParticleSystem>())
-            {
-                particleSystem.Stop();
-            }
-
-            foreach (var camera in Camera.allCameras)
-            {
-                camera.enabled = false;
-            }
-
-            // Set the quality level to the lowest
-            QualitySettings.SetQualityLevel(0, true);
-
-            // Disable soft particles
-            QualitySettings.softParticles = false;
-
-            // Disable real-time reflection probes
-            QualitySettings.realtimeReflectionProbes = false;
-
-            // Disable billboards face camera position
-            QualitySettings.billboardsFaceCameraPosition = false;
-            // Set max. pre-rendered frames to 1
-            QualitySettings.maxQueuedFrames = 0;
-
-            // Unload unused assets
-            Resources.UnloadUnusedAssets();
-            // Force garbage collection
-            //GC.Collect();
-            //GC.WaitForPendingFinalizers();
-            // Log the changes
-            Logger.LogInfo("Graphics settings have been disabled and textures reduced.");
-            // Start sending MOTD messages if not already running
-            if (!_isMOTDTaskRunning)
-            {
-                _isMOTDTaskRunning = true;
-                _motdCancellationTokenSource = new CancellationTokenSource();
-                StartSendingMOTDMessages(config.MOTD, _motdCancellationTokenSource.Token);
-            }
         }
-        
 
+        private void OptimizeServerPerformance()
+        {
+            // Reduce physics simulation frequency
+            //Time.fixedDeltaTime = 1.0f / 30.0f;
+            //Time.maximumDeltaTime = 1.0f / 30.0f;
+
+            // Disable automatic physics simulation if not needed
+            //Physics.autoSimulation = false;
+
+            // Disable unused physics features
+            // Example: Disable collision between certain layers
+            //Physics.IgnoreLayerCollision(0, 1, true);
+
+            // Enable incremental garbage collection
+            //UnityEngine.Scripting.GarbageCollector.incremental = true;
+
+            // Unload unused assets periodically
+            //InvokeRepeating(nameof(UnloadUnusedAssets), 300f, 300f); // Every 5 minutes
+
+            // Log the initial value of JobWorkerCount
+            int initialJobWorkerCount = Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount;
+            Logger.LogInfo($"Initial JobWorkerCount: {initialJobWorkerCount}");
+            // Limit job worker threads (adjust based on your server's CPU)
+            Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = _config.threadTest;
+
+            // Disable real-time global illumination
+            //UnityEngine.DynamicGI.updateThreshold = 1e9f;
+
+            // Set process priority to high
+            System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High;
+            
+            // Log optimization completion
+            Logger.LogInfo("Performance optimizations applied.");
+        }
         void OnLobbyCreated(LobbyCreated_t callback)
         {
             if (callback.m_eResult == EResult.k_EResultOK)
@@ -489,7 +470,9 @@ namespace JetFoxServer
                 }
             }
 
-            private static List<ulong> LoadBannedPlayerSteamIDs()
+        
+
+        private static List<ulong> LoadBannedPlayerSteamIDs()
             {
                 if (!File.Exists(BannedPlayersFilePath))
                 {
@@ -566,6 +549,8 @@ namespace JetFoxServer
             public string udpHost { get; set; }
             public string udpPort { get; set; }
             //public int ServerPort { get; set; }
+            public int threadTest { get; set; }
+            public string MissionGroup { get; set; } // Add this line
         }
     }
 }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using NetTools;
+using Mirage.SocketLayer;
 
 namespace JetFoxServer
 {
@@ -185,6 +186,13 @@ namespace JetFoxServer
                 case "shutdown":
                     Application.Quit();
                     return "Server is shutting down...\n";
+                case "setcore":
+                    if (args.Length > 0 && int.TryParse(args[0], out int fps2))
+                    {
+                        Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = fps2;
+                        return $"Target core rate set to {fps2}.\n";
+                    }
+                    return "Core count set.\n";
                 case "setfps":
                     if (args.Length > 0 && int.TryParse(args[0], out int fps))
                     {
