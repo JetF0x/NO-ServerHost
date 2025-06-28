@@ -12,6 +12,7 @@ using System.IO;
 using System.Reflection;
 using NetTools;
 using Mirage.SocketLayer;
+using Steamworks;
 
 namespace JetFoxServer
 {
@@ -186,6 +187,8 @@ namespace JetFoxServer
                 case "shutdown":
                     Application.Quit();
                     return "Server is shutting down...\n";
+                case "leavelobby":
+                    return JetFoxServerPlugin.LeaveLobby();
                 case "setcore":
                     if (args.Length > 0 && int.TryParse(args[0], out int fps2))
                     {

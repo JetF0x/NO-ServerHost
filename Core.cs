@@ -20,10 +20,11 @@ using Microsoft.Extensions.Logging;
 using NuclearOption.SceneLoading;
 using static MapSettingsManager;
 using Cysharp.Threading.Tasks;
-
+using NetTools.Extensions;
+using NetTools.Logger;
 namespace JetFoxServer
 {
-    [BepInPlugin("com.jetfox.server", "JetFox Server", "1.3.5")]
+    [BepInPlugin("com.jetfox.server", "JetFox Server", "1.3.6")]
     public class JetFoxServerPlugin : BaseUnityPlugin
     {
         private Harmony _harmony;
@@ -34,7 +35,8 @@ namespace JetFoxServer
         private Config _config;
         private static bool _graphicsSettingsApplied = false;
         private static CancellationTokenSource _motdCancellationTokenSource;
-
+        private static CSteamID _currentLobbyId;
+        private int? _pendingPortOverride = null;
         //private static ManualLogSource loggers;
         private static readonly string LogFilePath = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "playerLog.json");
         private static readonly ManualLogSource LoggerHook = BepInEx.Logging.Logger.CreateLogSource("PlayerLogger");
@@ -47,6 +49,93 @@ namespace JetFoxServer
         {
             _instance = this;
             Logger.LogInfo("JetFox Server Plugin loaded");
+
+
+            // Parse and log command-line arguments
+            string[] args = Environment.GetCommandLineArgs();
+            Logger.LogInfo("Launch arguments: " + string.Join(" ", args));
+
+            // Check for -port=XXXX argument
+            string portArg = args.FirstOrDefault(a => a.StartsWith("-port=", StringComparison.OrdinalIgnoreCase));
+            if (portArg != null)
+            {
+                if (int.TryParse(portArg.Substring(6), out int portValue))
+                {
+                    Logger.LogInfo($"Overriding udpPort and RconPort from launch argument: {portValue}");
+                    if (_config != null)
+                    {
+                        _config.udpPort = portValue.ToString();
+                        _config.RconPort = portValue + 1;
+                    }
+                    else
+                    {
+                        _pendingPortOverride = portValue;
+                    }
+                }
+                else
+                {
+                    Logger.LogWarning($"Invalid port value in argument: {portArg}");
+                }
+            }
+
+            // --- Robust -MissionSelected= parsing (handles spaces and quotes) ---
+            string pendingMissionSelected = null;
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i].StartsWith("-MissionSelected=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = args[i].Substring(17); // "-MissionSelected=".Length == 16
+
+                    // If it starts with a quote, join until the closing quote is found
+                    if (value.StartsWith("\""))
+                    {
+                        value = value.Substring(1); // Remove leading quote
+                        while (!value.EndsWith("\"") && i + 1 < args.Length)
+                        {
+                            i++;
+                            value += " " + args[i];
+                        }
+                        if (value.EndsWith("\""))
+                            value = value.Substring(0, value.Length - 1); // Remove trailing quote
+                    }
+                    // Remove any leading/trailing whitespace
+                    pendingMissionSelected = value.Trim();
+                    Logger.LogInfo($"MissionSelected override from argument: {pendingMissionSelected}");
+                    break;
+                }
+            }
+
+            // Check for -LobbyName= argument
+            string lobbyNameArg = args.FirstOrDefault(a => a.StartsWith("-LobbyName=", StringComparison.OrdinalIgnoreCase));
+            string pendingLobbyNameOverride = null;
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i].StartsWith("-LobbyName=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = args[i].Substring(11);
+
+                    // If it starts with a quote, join until the closing quote is found
+                    if (value.StartsWith("\""))
+                    {
+                        value = value.Substring(1); // Remove leading quote
+                        while (!value.EndsWith("\"") && i + 1 < args.Length)
+                        {
+                            i++;
+                            value += " " + args[i];
+                        }
+                        if (value.EndsWith("\""))
+                            value = value.Substring(0, value.Length - 1); // Remove trailing quote
+                    }
+                    else
+                    {
+                        // If not quoted, just use the value as is
+                    }
+
+                    pendingLobbyNameOverride = value.Trim();
+                    Logger.LogInfo($"Lobby name override from argument: {pendingLobbyNameOverride}");
+                    break;
+                }
+            }
 
             // Register the callback for steamLobby
             _lobbyCreatedCallback = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
@@ -62,11 +151,41 @@ namespace JetFoxServer
                     Logger.LogError("Invalid configuration file.");
                     return;
                 }
+
+                // Apply pending port override if set
+                if (_pendingPortOverride.HasValue)
+                {
+                    _config.udpPort = _pendingPortOverride.Value.ToString();
+                    _config.RconPort = _pendingPortOverride.Value + 1;
+                    Logger.LogInfo($"Applied port override from launch argument: udpPort={_config.udpPort}, RconPort={_config.RconPort}");
+                }
+
+                // Apply lobby name override if set
+                if (!string.IsNullOrEmpty(pendingLobbyNameOverride))
+                {
+                    _config.LobbyName = pendingLobbyNameOverride;
+                }
+
+                // Always append FoxHosting to the lobby name
+                const string foxPrefix = "{FoxHosting} ";
+                if (!_config.LobbyName.StartsWith(foxPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    _config.LobbyName = foxPrefix + _config.LobbyName.TrimStart();
+                }
+                Logger.LogInfo($"Final lobby name: {_config.LobbyName}");
             }
             catch (Exception ex)
             {
                 Logger.LogError("Failed to read configuration from config file: " + ex.Message);
                 return;
+            }
+
+            // Apply mission selected override if set (always override)
+            if (!string.IsNullOrEmpty(pendingMissionSelected))
+            {
+                _config.MissionNames = new[] { pendingMissionSelected };
+                Logger.LogInfo($"MissionSelected override active. Using only: {pendingMissionSelected}");
+                _currentMissionIndex = 0; // Always start at 0 if only one mission
             }
 
             // Start RCON server if not already running
@@ -84,7 +203,7 @@ namespace JetFoxServer
             _harmony = new Harmony("com.jetfox.server");
             _harmony.PatchAll();
 
-            await Task.Delay(10000);
+            await Task.Delay(3000);
 
             await StartServer(_config);
         }
@@ -168,7 +287,7 @@ namespace JetFoxServer
         private async Task StartServer(Config config)
         {
             // Sleep for 10 seconds to allow other plugins to load
-            await Task.Delay(5000);
+            await Task.Delay(2000);
             if (NetworkManagerNuclearOption.i.Server.Active)
             {
                 // Notify all clients that the host is ending the game
@@ -190,7 +309,7 @@ namespace JetFoxServer
 
             Logger.LogInfo("Stopped the game-server.");
             // Delay execution by 5 seconds
-            await Task.Delay(5000);
+            await Task.Delay(2000);
             //Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = 32;
             Logger.LogInfo("Starting game-server...");
 
@@ -258,7 +377,6 @@ namespace JetFoxServer
                 */
 
                 SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypePublic, config.PlayerCount);
-
                 Logger.LogInfo("Lobby hosted with name: " + config.LobbyName);
 
                 await Task.Delay(5000);
@@ -299,6 +417,7 @@ namespace JetFoxServer
             // Unload unused assets periodically
             //InvokeRepeating(nameof(UnloadUnusedAssets), 300f, 300f); // Every 5 minutes
 
+            Application.targetFrameRate = _config.TargetFrameRate;
             // Log the initial value of JobWorkerCount
             int initialJobWorkerCount = Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount;
             Logger.LogInfo($"Initial JobWorkerCount: {initialJobWorkerCount}");
@@ -335,6 +454,9 @@ namespace JetFoxServer
                 }
                 else if (_config.UdpSteam == "udp")
                 {
+                    _currentLobbyId = lobbyID; // Store the lobby ID for later use
+                    //ulong randomSteamID = GenerateRandomSteamID();
+                    //SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", randomSteamID.ToString());
                     SteamMatchmaking.SetLobbyData(lobbyID, "HostAddress", SteamUser.GetSteamID().ToString());
                     SteamMatchmaking.SetLobbyData(lobbyID, "name", _config.LobbyName);
                     SteamMatchmaking.SetLobbyData(lobbyID, "version", Application.version);
@@ -356,6 +478,29 @@ namespace JetFoxServer
             }
         }
 
+        public static string LeaveLobby()
+        {
+            if (_currentLobbyId.IsValid())
+            {
+                SteamMatchmaking.LeaveLobby(_currentLobbyId);
+                return "Left the Steam lobby.\n";
+            }
+            return "No valid lobby to leave.\n";
+        }
+        private static ulong GenerateRandomSteamID()
+        {
+            // SteamID64 for individual accounts starts at this base
+            const ulong steamID64Base = 76561197960265728;
+            // The range for user accounts is large, but you can limit it for practical purposes
+            const ulong maxOffset = 9999999999999; // Adjust as needed
+
+            var rng = new System.Random();
+            // Generate a random offset
+            ulong offset = ((ulong)rng.Next(0, int.MaxValue) << 32) | (uint)rng.Next(0, int.MaxValue);
+            offset %= maxOffset;
+
+            return steamID64Base + offset;
+        }
         public static void RestartServer(bool endMessage)
         {
             // Send a chat message when the game ends
@@ -397,6 +542,7 @@ namespace JetFoxServer
         {
             // Stop RCON server
             //_rconServer.Stop();
+
         }
 
         [HarmonyPatch(typeof(FactionHQ), "RpcDeclareEndGame")]
@@ -451,7 +597,7 @@ namespace JetFoxServer
             }
         }
 
-        [HarmonyPatch(typeof(NetworkAuthenticatorNuclearOption), "SteamAuthenticate")]
+        /*[HarmonyPatch(typeof(NetworkAuthenticatorNuclearOption), "SteamAuthenticate")]
             public class SteamAuthenticatePatch
             {
                 private static void Postfix(NetworkAuthenticatorNuclearOption __instance, INetworkPlayer player, ref AuthenticationResult __result)
@@ -459,7 +605,9 @@ namespace JetFoxServer
                     if (player.Address is SteamEndPoint sep)
                     {
                         var steamId = sep.Connection.SteamID;
+                        
                         var bannedPlayers = LoadBannedPlayerSteamIDs();
+                        
                         if (bannedPlayers.Contains(steamId.m_SteamID))
                         {
                             LoggerHook.LogInfo($"Denied steamID {steamId.m_SteamID} banned from joining");
@@ -468,9 +616,52 @@ namespace JetFoxServer
                         }
                     }
                 }
+            }*/
+
+        [HarmonyPatch(typeof(NetworkAuthenticatorNuclearOption))]
+        [HarmonyPatch("SteamAuthenticate")]
+        public static class SteamAuthenticatePatch
+        {
+            public static void Prefix(INetworkPlayer player)
+            {
+                try
+                {
+                    // Get the SteamID using the same method the game uses
+                    CSteamID steamId = GetSteamId(player);
+
+                    if (steamId.IsValid())
+                    {
+                        // Get the player's Steam name using the Steamworks API
+                        string playerName = SteamFriends.GetFriendPersonaName(steamId);
+                        LoggerHook.LogInfo($"Player connecting: {playerName} (SteamID: {steamId})");
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    LoggerHook.LogError($"Error getting Steam username: {ex.Message}");
+                }
             }
 
-        
+            // Copy of the game's GetSteamId method
+            private static CSteamID GetSteamId(INetworkPlayer player)
+            {
+                if (player.IsHost)
+                {
+                    return SteamUser.GetSteamID();
+                }
+
+                // Try to get SteamEndPoint from the player's address
+                var steamEndPoint = player.Address as SteamEndPoint;
+                if (steamEndPoint != null)
+                {
+                    return steamEndPoint.Connection.SteamID;
+                }
+
+                return default(CSteamID);
+            }
+        }
+
+
 
         private static List<ulong> LoadBannedPlayerSteamIDs()
             {
